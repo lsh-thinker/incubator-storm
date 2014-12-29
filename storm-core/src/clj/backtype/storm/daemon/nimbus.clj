@@ -76,6 +76,9 @@
                                  (exit-process! 20 "Error when processing an event")
                                  ))
      :scheduler (mk-scheduler conf inimbus)
+;;#thinker-start
+     :is-leader (atom false)
+;;#thinker-end
      }))
 
 (defn inbox [nimbus]
@@ -913,7 +916,16 @@
                         (conf NIMBUS-CLEANUP-INBOX-FREQ-SECS)
                         (fn []
                           (clean-inbox (inbox nimbus) (conf NIMBUS-INBOX-JAR-EXPIRATION-SECS))
-                          ))    
+                          ))  
+;;thinker-start
+    (schedule-recurring (:timer nimbus)
+                        0
+                        (conf NIMBUS-CLEANUP-INBOX-FREQ-SECS)
+                        (fn []
+                          (do-check (inbox nimbus) (conf NIMBUS-TOPOLOGY-CHECK-SECS))
+                          ))  
+;;thinker-end
+
     (reify Nimbus$Iface
       (^void submitTopologyWithOpts
         [this ^String storm-name ^String uploadedJarLocation ^String serializedConf ^StormTopology topology
@@ -1154,7 +1166,30 @@
                     (.protocolFactory (TBinaryProtocol$Factory. false true (conf NIMBUS-THRIFT-MAX-BUFFER-SIZE)))
                     (.processor (Nimbus$Processor. service-handler))
                     )
-       server (THsHaServer. (do (set! (. options maxReadBufferBytes)(conf NIMBUS-THRIFT-MAX-BUFFER-SIZE)) options))]
+       server (THsHaServer. (do (set! (. options maxReadBufferBytes)(conf NIMBUS-THRIFT-MAX-BUFFER-SIZE)) options))
+;;##thinker-start
+       thread (Thread. 
+                (fn []
+                   (try-cause
+                      (try-to-be-master)
+                      (catch Exception ex
+                        (log-error "Async loop interrupted!")
+                        (throw (RuntimeException. "try to be leader error."))
+                       )
+                    )
+                   (try-cause
+                      (try-to-be-master)
+                      (catch Exception ex
+                        (log-error "register nimbus host fail!")
+                        (throw (RuntimeException.))
+                       )
+                    )
+                   (let [callback ]
+
+                    )
+              ))
+       ]
+;;##thinker-end
     (add-shutdown-hook-with-force-kill-in-1-sec (fn []
                                                   (.shutdown service-handler)
                                                   (.stop server)))
@@ -1202,3 +1237,62 @@
 
 (defn -main []
   (-launch (standalone-nimbus)))
+
+;;thinker-start
+(defn try-to-be-leader[conf]
+  (let [master-callback  
+          (try-cause
+            (try-to-be-master)
+              (catch Exception ex
+                (log-error "To be master error.")
+                (throw (RuntimeException. ""))
+              )
+                    )
+    ]
+    (set-leader (data storm-cluster-state 
+        (try-to-be-master )))
+    ))
+
+(defn do-check[nimbus]
+    (let [storm-cluster-state (:storm-cluster-state nimbus)
+        ]
+        (if (is-leader nimbus)
+            (unregister-nimbus-host! storm-cluster-state)
+          )
+        (if-not (leader-existed storm-cluster-state)
+            (try-to-be-leader (:conf nimbus))
+          )
+        (check-topologies )
+        (update-follower-heartbeat storm-cluster-state node port (:uptime nimbus))
+    )
+  )
+
+(defn check-topologies[nimbus]
+    (let [storm-cluster-state (:storm-cluster-state nimbus) 
+        local-root (master-stormdist-root (:conf nimbus) storm-id)
+
+      ]
+      (if 
+        (rmr (master-stormdist-root conf id))
+      (if 
+        (let [assignment (.assignment-info storm-cluster-state id nil)
+          ])
+        (get-code-form-master nimbus topology-id))
+
+    )
+  )
+
+
+(defn get-code-form-master[nimbus assignment topology-id]
+    (let [
+        local-root (master-stormdist-root (:conf nimbus) storm-id)
+        tmpDir (str (inbox nimbus) "/" (uuid))
+        master-code-dir (:master-code-dir assignment)]
+      (log-message "Downloading code for storm id " topology-id " from " master-code-dir)
+      (download-storm-code (:conf nimbus) topology-id master-code-dir)
+      (log-message "Finished downloading code for storm id " storm-id " from " master-code-dir)
+      )
+
+  )
+;;thinker-end
+
