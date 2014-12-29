@@ -1,7 +1,7 @@
 package edu.sjtu.se.dclab;
 
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -14,17 +14,12 @@ import org.slf4j.LoggerFactory;
 import backtype.storm.scheduler.Cluster;
 import backtype.storm.scheduler.ExecutorDetails;
 import backtype.storm.scheduler.IScheduler;
+import backtype.storm.scheduler.SupervisorDetails;
 import backtype.storm.scheduler.Topologies;
 import backtype.storm.scheduler.TopologyDetails;
 import backtype.storm.scheduler.WorkerSlot;
 
 public class ResourceDemandScheduler implements IScheduler {
-
-	private static final int DISK_WEIGHT = 4;
-	private static final int MEMORY_WEIGHT = 4;
-	private static final int CPU_WEIGHT = 4;
-	private static final int NETWORK_WEIGHT = 4;
-	private static final int DEFAULT_WEIGHT = 1;
 
 	private static final Logger LOG = LoggerFactory
 			.getLogger(ResourceDemandScheduler.class);
@@ -37,152 +32,217 @@ public class ResourceDemandScheduler implements IScheduler {
 	@Override
 	public void schedule(Topologies topologies, Cluster cluster) {
 
-		// return the every with each resource weight
-		Map<WorkerSlot, Map<ResourceType, Integer>> workerResourceWeight = null;
-		workerResourceWeight = new WorkerResourceCalculator(cluster)
-				.calculateResourceWeight();
+		final SupervisorResourceCalculator supervisorCalculator = new SupervisorResourceCalculator(
+				cluster);
 
-		TopologyResourceCalculator calculator = new TopologyResourceCalculator();
-		// topology id to resource need
-		final Map<String, Map<ResourceType, Integer>> topologyResourceWeight = new TopologyResourceCalculator()
-				.calculateResourceWeight(topologies);
-		final int totalWeight = calculator.getTotalWeight();
-		final Map<ResourceType, Integer> totalWeightMap = calculator.totalWeightMap;
+		List<SupervisorResource> supervisorResources = supervisorCalculator
+				.calculateSupervisorResource();
 
-		PriorityQueue<Map.Entry<WorkerSlot, Map<ResourceType, Integer>>> newWorkerResourceWeightQueue = new PriorityQueue<Map.Entry<WorkerSlot, Map<ResourceType, Integer>>>(
-				workerResourceWeight.size(), new ResourceComparator(
-						totalWeight, totalWeightMap));
+		final TopologyResourceCalculator topologyCalculator = new TopologyResourceCalculator();
 
-		newWorkerResourceWeightQueue.addAll(workerResourceWeight.entrySet());
+		List<TopologyResource> topologyResources = topologyCalculator
+				.getTopologiesResource(topologies);
 
-		//
-		for (Map.Entry<String, Map<ResourceType, Integer>> topologyResourceEntry : topologyResourceWeight
+		Map<String, List<WorkerSlot>> availableSlots = new HashMap<String, List<WorkerSlot>>();
+		Map<String, SupervisorDetails> supervisors = cluster.getSupervisors();
+		// get all the available slots of each supervisor
+		for (Map.Entry<String, SupervisorDetails> entry : supervisors
 				.entrySet()) {
+			availableSlots.put(entry.getKey(),
+					cluster.getAssignableSlots(entry.getValue()));
+		}
 
-			TopologyDetails topology = topologies.getById(topologyResourceEntry
-					.getKey());
-			int numOfWorkers = topology.getNumWorkers();
+		Map<String, List<WorkerSlot>> assignedSlots = new HashMap<String, List<WorkerSlot>>();
 
-			boolean success = true;
-			List<Map.Entry<WorkerSlot, Map<ResourceType, Integer>>> tmpList  = new ArrayList<Map.Entry<WorkerSlot, Map<ResourceType, Integer>>>();
-			for (int i = 0; i < numOfWorkers; ++i) {
-				Map.Entry<WorkerSlot, Map<ResourceType, Integer>> workerResource = newWorkerResourceWeightQueue.poll();
-				if (workerResource == null){
-					success = false;
-				}else{
-					tmpList.add(workerResource);
-				}
+		for (TopologyResource tr : topologyResources) {
+			// put the supervisor resource in the array for sort
+			SupervisorResource[] sortedSR = new SupervisorResource[supervisorResources
+					.size()];
+			sortedSR = supervisorResources.toArray(sortedSR);
 
-				Map<ResourceType, Integer> topologyResource = topologyResourceEntry.getValue();
-				//判断这个worker是否有足够的资源可以使用
-				boolean available = isWorkerHasEnoughResource(workerResource.getValue(), topologyResource);
-				if (!available){
-					success = false;
-					break;
-				}
-				
+			List<WorkerSlot> cpuSlots = allocateCpuSlots(tr, sortedSR,availableSlots);
+			List<WorkerSlot> memSlots = allocateMemSlots(tr, sortedSR,availableSlots);
+			List<WorkerSlot> diskSlots = allocateDiskSlots(tr, sortedSR,availableSlots);
+			List<WorkerSlot> networkSlots = allocateNetSlots(tr, sortedSR,availableSlots);
+			List<WorkerSlot> commonSlots = allocateCommponSlots(tr, sortedSR,availableSlots);
+
+			TopologyDetails td = topologies.getById(tr.getTopologyId());
+			Map<ResourceType, List<ExecutorDetails>> resourceTypeToExecutors = topologyCalculator
+					.calcluateExecutors(topologies.getById(tr.getTopologyId()));
+
+			Map<WorkerSlot, List<ExecutorDetails>> result = new HashMap<WorkerSlot, List<ExecutorDetails>>();
+			if (cpuSlots != null) {
+				allocateExecutors(cpuSlots, resourceTypeToExecutors.get(ResourceType.CPU), result);
 			}
-			//如果不成功的话，把取出来的worker放回去
-			if (!success){
-				for(Map.Entry<WorkerSlot, Map<ResourceType, Integer>> workerResource: tmpList){
-					newWorkerResourceWeightQueue.add(workerResource);
-				}
-				//计算下一个topology
-				continue;
+			if (memSlots != null) {
+				allocateExecutors(memSlots,resourceTypeToExecutors.get(ResourceType.MEMORY),
+						result);
+			}
+			if (diskSlots != null) {
+				allocateExecutors(diskSlots,resourceTypeToExecutors.get(ResourceType.DISK), result);
+			}
+			if (networkSlots != null)
+				allocateExecutors(networkSlots, resourceTypeToExecutors.get(ResourceType.NETWORK),
+						result);
+			if (commonSlots != null){
+				allocateExecutors(commonSlots, resourceTypeToExecutors.get(ResourceType.DEFAULT),
+						result);
 			}
 			
-			//初始化一个map，用来存储worker和executor之间的分配关系
-			List<WorkerSlot> availableSlots = new ArrayList<WorkerSlot>();
-			Map<WorkerSlot, List<ExecutorDetails>> assignedSlots = new HashMap<WorkerSlot, List<ExecutorDetails>>(topology.getNumWorkers());
-			for(Map.Entry<WorkerSlot, Map<ResourceType, Integer>> entry: tmpList){
-				assignedSlots.put(entry.getKey(), new ArrayList<ExecutorDetails>());
-				availableSlots.add(entry.getKey());
+			for (Map.Entry<WorkerSlot, List<ExecutorDetails>> e : result.entrySet()) {
+				cluster.assign(e.getKey(), tr.getTopologyId(), e.getValue());
 			}
-			//将executor均匀分配到取得的多个worker上
-			int slotIndex = 0;
-			int size = assignedSlots.size();
-			for(ExecutorDetails executor : topology.getExecutors()){
-				assignedSlots.get(
-						availableSlots.get(slotIndex % size)).add(executor);
-				++slotIndex;
-			}
-			//调用cluster接口进行分配
-			for(Map.Entry<WorkerSlot, List<ExecutorDetails>> e: assignedSlots.entrySet()){
-				cluster.assign(e.getKey(), topology.getId(), e.getValue());
-			}
-
 		}
+
+		// 调用cluster接口进行分配
 		
-//		new EvenScheduler().schedule(topologies, cluster);
+		// new EvenScheduler().schedule(topologies, cluster);
 	}
 
-	public Map<ResourceType, Integer> calculateNewWorkerResource(
-			Map<ResourceType, Integer> workerResource,
-			Map<ResourceType, Integer> topologyResource) {
-		for (Map.Entry<ResourceType, Integer> e : workerResource.entrySet()) {
-			int resourceNeeded = topologyResource.get(e.getKey());
-			int newResourceVal = e.getValue() - resourceNeeded;
-			workerResource.put(e.getKey(), newResourceVal);
-		}
-		return workerResource;
-	}
-
-	public boolean isWorkerHasEnoughResource(
-			Map<ResourceType, Integer> workerResource,
-			Map<ResourceType, Integer> topologyResource) {
-		for (Map.Entry<ResourceType, Integer> e : workerResource.entrySet()) {
-			int resourceNeeded = topologyResource.get(e.getKey());
-			if (resourceNeeded > e.getValue())
-				return false;
-		}
-		return true;
-	}
-
-	public void getWorkersBasedOnWeight() {
-
-	}
-
-	private class ResourceComparator implements
-			Comparator<Map.Entry<WorkerSlot, Map<ResourceType, Integer>>> {
-
-		private final int totalWeight;
-		private final Map<ResourceType, Integer> totalWeightMap;
-
-		ResourceComparator(final int totalWeight,
-				final Map<ResourceType, Integer> totalWeightMap) {
-			this.totalWeight = totalWeight;
-			this.totalWeightMap = totalWeightMap;
-		}
-
-		@Override
-		public int compare(Map.Entry<WorkerSlot, Map<ResourceType, Integer>> o1,
-				Map.Entry<WorkerSlot, Map<ResourceType, Integer>> o2) {
-
-			int scoreA = 0;
-			for (Map.Entry<ResourceType, Integer> entry : o1.getValue()
-					.entrySet()) {
-				scoreA += (entry.getValue()
-						* totalWeightMap.get(entry.getKey()) / totalWeight);
-				// LOG.info("The score of Resource " + entry.getKey() + "is " +
-				// );
+	public void allocateExecutors(List<WorkerSlot> workerSlots,
+			List<ExecutorDetails> executors,
+			Map<WorkerSlot, List<ExecutorDetails>> result) {
+		int index = 0;
+		while (index < executors.size()) {
+			for (WorkerSlot ws : workerSlots) {
+				if (index >= executors.size())
+					return;
+				if (result.get(ws) == null) {
+					result.put(ws, new ArrayList<ExecutorDetails>());
+				}
+				result.get(ws).add(executors.get(index++));
 			}
-
-			int scoreB = 0;
-			for (Map.Entry<ResourceType, Integer> entry : o2.getValue()
-					.entrySet()) {
-				scoreB += (entry.getValue()
-						* totalWeightMap.get(entry.getKey()) / totalWeight);
-				// LOG.info("The score of Resource " + entry.getKey() + "is " +
-				// );
-			}
-
-			if (scoreA > scoreB)
-				return -1;
-			else if (scoreA < scoreB)
-				return 1;
-			return 0;
 		}
+	}
 
+	public List<WorkerSlot> allocateCpuSlots(TopologyResource tr,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		if (tr.getCpuWorkers() != 0) {
+			int needCpuWorkers = tr.getCpuWorkers();
+			// sort by cpu load ascending
+			Arrays.sort(sortedSR, new ResourceComparator.CPULoadComparator());
+			LOG.info("all supervisors");
+			for (SupervisorResource sr : sortedSR) {
+				LOG.info("supervisor " + sr.getHostName() + " cpu load="
+						+ sr.getCpuLoad());
+			}
+			return allocateSlots(needCpuWorkers, sortedSR, availableSlots);
+		} else {
+			return null;
+		}
+	}
+
+	public List<WorkerSlot> allocateCommponSlots(TopologyResource tr,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		if (tr.getCommonWorkers() != 0) {
+			int needCommonWorkers = tr.getCommonWorkers();
+			List<WorkerSlot> commonSlots = new ArrayList<WorkerSlot>();
+			Arrays.sort(sortedSR, new ResourceComparator.CommonComparator());
+			boolean enough = false;
+			while (true) {
+				enough = false;
+				for (SupervisorResource sr : sortedSR) {
+					if (needCommonWorkers <= 0)
+						return commonSlots;
+					if (sr.getAvailableSlots() <= 0)
+						continue;
+					enough = true;
+					List<WorkerSlot> aSlots = availableSlots
+							.get(sr.getNodeId());
+					// remove the last one
+					commonSlots.add(aSlots.get(aSlots.size() - 1));
+					aSlots.remove(aSlots.size() - 1);
+					sr.setAvailableSlots(sr.getAvailableSlots() - 1);
+				}
+				if (!enough)
+					throw new RuntimeException("Not enougth slots");
+			}
+		} else {
+			return null;
+		}
+	}
+
+	public List<WorkerSlot> allocateMemSlots(TopologyResource tr,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		if (tr.getMemWorkers() != 0) {
+			int needMemWorkers = tr.getMemWorkers();
+			// sort by free memory decending
+			Arrays.sort(sortedSR, new ResourceComparator.MemoryFreeComparator());
+			LOG.info("all supervisors");
+			for (SupervisorResource sr : sortedSR) {
+				LOG.info("supervisor " + sr.getHostName() + " free memory="
+						+ sr.getMemFree());
+			}
+			return allocateSlots(needMemWorkers, sortedSR, availableSlots);
+		} else {
+			return null;
+		}
+	}
+
+	public List<WorkerSlot> allocateDiskSlots(TopologyResource tr,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		if (tr.getDiskWorkers() != 0) {
+			int needDiskWorkers = tr.getDiskWorkers();
+			// sort by free disk decending
+			Arrays.sort(sortedSR, new ResourceComparator.DiskFreeComparator());
+			LOG.info("all supervisors");
+			for (SupervisorResource sr : sortedSR) {
+				LOG.info("supervisor " + sr.getHostName() + " free disk="
+						+ sr.getDiskFree());
+			}
+			return allocateSlots(needDiskWorkers, sortedSR, availableSlots);
+		} else {
+			return null;
+		}
+	}
+
+	public List<WorkerSlot> allocateNetSlots(TopologyResource tr,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		if (tr.getCpuWorkers() != 0) {
+			int needNetWorkers = tr.getNetWorkers();
+			// sort by network bytes ascending
+			Arrays.sort(sortedSR, new ResourceComparator.BytesInOutComparator());
+			LOG.info("all supervisors");
+			for (SupervisorResource sr : sortedSR) {
+				LOG.info("supervisor " + sr.getHostName()
+						+ " bytes in out reate =" + sr.getBytesInOut());
+			}
+			return allocateSlots(needNetWorkers, sortedSR, availableSlots);
+		} else {
+			return null;
+		}
+	}
+
+	private List<WorkerSlot> allocateSlots(int needWorkers,
+			SupervisorResource[] sortedSR,
+			Map<String, List<WorkerSlot>> availableSlots) {
+		List<WorkerSlot> assignedSlots = new ArrayList<WorkerSlot>();
+		for (SupervisorResource sr : sortedSR) {
+			// available slots of this supervisor
+			List<WorkerSlot> aSlots = availableSlots.get(sr.getNodeId());
+			if (sr.getAvailableSlots() >= needWorkers) {
+				// allocate the workers for the supervisor
+				for (int i = 0; i < needWorkers; ++i) {
+					// remove the last slot
+					WorkerSlot ws = aSlots.get(aSlots.size() - 1);
+					assignedSlots.add(ws);
+					aSlots.remove(aSlots.size() - 1);
+				}
+				sr.setAvailableSlots(sr.getAvailableSlots() - needWorkers);
+			} else {
+				// add all the slots
+				assignedSlots.addAll(aSlots);
+				needWorkers -= sr.getAvailableSlots();
+				sr.setAvailableSlots(0);
+				aSlots.clear();
+			}
+		}
+		return assignedSlots;
 	}
 
 }

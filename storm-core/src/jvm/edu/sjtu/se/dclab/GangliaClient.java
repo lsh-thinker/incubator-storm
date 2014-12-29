@@ -27,7 +27,8 @@ public class GangliaClient {
 			int skip = 3;
 			while((line = in.readLine())!= null){
 				if (isValid){
-					LOG.info(line);
+					System.out.println(line);
+					//LOG.info(line);
 					metricString.append(line);
 					continue;
 				}
