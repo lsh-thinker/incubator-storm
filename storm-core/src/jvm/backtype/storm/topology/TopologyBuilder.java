@@ -17,6 +17,12 @@
  */
 package backtype.storm.topology;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.json.simple.JSONValue;
+
 import backtype.storm.Config;
 import backtype.storm.generated.Bolt;
 import backtype.storm.generated.ComponentCommon;
@@ -30,10 +36,7 @@ import backtype.storm.generated.StormTopology;
 import backtype.storm.grouping.CustomStreamGrouping;
 import backtype.storm.tuple.Fields;
 import backtype.storm.utils.Utils;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
-import org.json.simple.JSONValue;
+import edu.sjtu.se.dclab.ResourceType;
 
 /**
  * TopologyBuilder exposes the Java API for specifying a topology for Storm
@@ -124,8 +127,20 @@ public class TopologyBuilder {
      * @return use the returned object to declare the inputs to this component
      */
     public BoltDeclarer setBolt(String id, IRichBolt bolt) {
-        return setBolt(id, bolt, null);
+    	//use default resource type
+        return setBolt(id, bolt, null, ResourceType.DEFAULT);
     }
+    
+    //define with a resource type
+    public BoltDeclarer setBolt(String id, IRichBolt bolt, ResourceType resoureType) {
+        return setBolt(id, bolt, null, resoureType);
+    }
+    
+    public BoltDeclarer setBolt(String id, IRichBolt bolt, Number parallelism_hint) {
+        return setBolt(id, bolt, parallelism_hint, ResourceType.DEFAULT);
+    }
+    
+
 
     /**
      * Define a new bolt in this topology with the specified amount of parallelism.
@@ -133,12 +148,14 @@ public class TopologyBuilder {
      * @param id the id of this component. This id is referenced by other components that want to consume this bolt's outputs.
      * @param bolt the bolt
      * @param parallelism_hint the number of tasks that should be assigned to execute this bolt. Each task will run on a thread in a process somewhere around the cluster.
+     * @param resouceType the resource type may needed by this bolt 
      * @return use the returned object to declare the inputs to this component
      */
-    public BoltDeclarer setBolt(String id, IRichBolt bolt, Number parallelism_hint) {
+    public BoltDeclarer setBolt(String id, IRichBolt bolt, Number parallelism_hint, ResourceType resourceType) {
         validateUnusedId(id);
-        initCommon(id, bolt, parallelism_hint);
+        initCommon(id, bolt, parallelism_hint, resourceType);
         _bolts.put(id, bolt);
+        //add the resouce type definition
         return new BoltGetter(id);
     }
 
@@ -153,7 +170,15 @@ public class TopologyBuilder {
      * @return use the returned object to declare the inputs to this component
      */
     public BoltDeclarer setBolt(String id, IBasicBolt bolt) {
-        return setBolt(id, bolt, null);
+        return setBolt(id, bolt, null, ResourceType.DEFAULT);
+    }
+    
+    public BoltDeclarer setBolt(String id, IBasicBolt bolt, ResourceType resoureType) {
+        return setBolt(id, bolt, null, resoureType);
+    }
+    
+    public BoltDeclarer setBolt(String id, IBasicBolt bolt, Number parallelism_hint) {
+        return setBolt(id, bolt, parallelism_hint, ResourceType.DEFAULT);
     }
 
     /**
@@ -167,8 +192,8 @@ public class TopologyBuilder {
      * @param parallelism_hint the number of tasks that should be assigned to execute this bolt. Each task will run on a thread in a process somwehere around the cluster.
      * @return use the returned object to declare the inputs to this component
      */
-    public BoltDeclarer setBolt(String id, IBasicBolt bolt, Number parallelism_hint) {
-        return setBolt(id, new BasicBoltExecutor(bolt), parallelism_hint);
+    public BoltDeclarer setBolt(String id, IBasicBolt bolt, Number parallelism_hint, ResourceType resourceType) {
+        return setBolt(id, new BasicBoltExecutor(bolt), parallelism_hint, resourceType);
     }
 
     /**
@@ -178,7 +203,15 @@ public class TopologyBuilder {
      * @param spout the spout
      */
     public SpoutDeclarer setSpout(String id, IRichSpout spout) {
-        return setSpout(id, spout, null);
+        return setSpout(id, spout, null, ResourceType.DEFAULT);
+    }
+    
+    public SpoutDeclarer setSpout(String id,  IRichSpout spout, ResourceType resoureType) {
+        return setSpout(id, spout, null, resoureType);
+    }
+    
+    public SpoutDeclarer setSpout(String id, IRichSpout spout, Number parallelism_hint) {
+        return setSpout(id, spout, parallelism_hint, ResourceType.DEFAULT);
     }
 
     /**
@@ -190,10 +223,12 @@ public class TopologyBuilder {
      * @param parallelism_hint the number of tasks that should be assigned to execute this spout. Each task will run on a thread in a process somwehere around the cluster.
      * @param spout the spout
      */
-    public SpoutDeclarer setSpout(String id, IRichSpout spout, Number parallelism_hint) {
+    public SpoutDeclarer setSpout(String id, IRichSpout spout, Number parallelism_hint, ResourceType resourceType) {
         validateUnusedId(id);
-        initCommon(id, spout, parallelism_hint);
+        initCommon(id, spout, parallelism_hint, resourceType);
         _spouts.put(id, spout);
+        //add the resouce type definition
+        
         return new SpoutGetter(id);
     }
 
@@ -228,12 +263,16 @@ public class TopologyBuilder {
         return ret;        
     }
     
-    private void initCommon(String id, IComponent component, Number parallelism) {
+    private void initCommon(String id, IComponent component, Number parallelism, ResourceType resourceType) {
         ComponentCommon common = new ComponentCommon();
         common.set_inputs(new HashMap<GlobalStreamId, Grouping>());
         if(parallelism!=null) common.set_parallelism_hint(parallelism.intValue());
-        Map conf = component.getComponentConfiguration();
-        if(conf!=null) common.set_json_conf(JSONValue.toJSONString(conf));
+        Map<String, Object> conf = component.getComponentConfiguration();
+        
+        if(conf!=null) {conf = new HashMap<String,Object>();}
+        conf.put(Config.STORM_COMPONENT_RESOURCE_TYPE, resourceType);
+        common.set_json_conf(JSONValue.toJSONString(conf));
+        
         _commons.put(id, common);
     }
 

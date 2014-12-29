@@ -42,6 +42,19 @@ import java.util.Map;
  * Spouts.</p>
  */
 public class Config extends HashMap<String, Object> {
+	
+	
+	
+	/**
+	 * 
+	 */
+	public static final String STORM_TOPOLOGY_SINGLE_NODE = "storm.topology.single.node";
+	public static final Object STORM_TOPOLOGY_SINGLE_NODE_SCHEMA = String.class;
+	public static final String STORM_TOPOLOGY_HISTORY_SCHEDULE = "storm.topology.hisitory.schedule";
+	public static final Object STORM_TOPOLOGY_HISTORY_SCHEDULE_SCHEMA = String.class;
+	public static final String STORM_COMPONENT_RESOURCE_TYPE = "storm.component.resource.type";
+	public static final Object STORM_COMPONENT_RESOURCE_TYPE_SCHEMA = String.class;
+	
     /**
      * The transporter for communication among Storm tasks
      */
@@ -854,6 +867,22 @@ public class Config extends HashMap<String, Object> {
      */
     public static final String ISOLATION_SCHEDULER_MACHINES = "isolation.scheduler.machines";
     public static final Object ISOLATION_SCHEDULER_MACHINES_SCHEMA = Map.class;
+    
+    // add for the single node
+    public static void setUseSingleNode(Map conf, boolean isOn){
+    	conf.put(Config.STORM_TOPOLOGY_SINGLE_NODE, isOn);
+    }
+    public void setUseSingleNode(boolean isOn){
+    	setUseSingleNode(this, isOn);
+    }
+    //add for use the history assignment
+    public static void setUseHistorySchedule(Map conf, boolean isOn){
+    	conf.put(Config.STORM_TOPOLOGY_HISTORY_SCHEDULE, isOn);
+    }
+    public void setUseHistorySchedule(boolean isOn){
+    	setUseHistorySchedule(this, isOn);
+    }
+    
 
     public static void setClasspath(Map conf, String cp) {
         conf.put(Config.TOPOLOGY_CLASSPATH, cp);
