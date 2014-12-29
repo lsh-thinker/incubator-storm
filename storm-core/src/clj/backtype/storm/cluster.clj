@@ -35,7 +35,11 @@
   (mkdirs [this path])
   (close [this])
   (register [this callback])
+;;thinker-start
+  (node-existed [this path watch?])
+;;thinker-end
   (unregister [this id]))
+
 
 (defn mk-distributed-cluster-state
   [conf]
@@ -118,6 +122,13 @@
        [this path]
        (zk/mkdirs zk path))
 
+;;thinker-start
+     (node-existed
+       [this path watch]
+       (zk/exists zk path false)
+      )
+;;thinker-end
+
      (close
        [this]
        (reset! active false)
@@ -149,7 +160,14 @@
   (remove-storm! [this storm-id])
   (report-error [this storm-id task-id node port error])
   (errors [this storm-id task-id])
+;;##thinker-start
+  (register-nimbus-host [this node port])
+  (ungister-nimbus-host [this node port])
+  (get-leader-host [this])
+  (leader-existed [this])
+;;##thinker-end
   (disconnect [this]))
+
 
 (def ASSIGNMENTS-ROOT "assignments")
 (def CODE-ROOT "code")
@@ -157,12 +175,20 @@
 (def SUPERVISORS-ROOT "supervisors")
 (def WORKERBEATS-ROOT "workerbeats")
 (def ERRORS-ROOT "errors")
+;;##thinker-start
+(def MASTER-ROOT "nimbus-master") 
+(def SLAVE-ROOT "nimbus-slaves")
+;;##thinker-end
 
 (def ASSIGNMENTS-SUBTREE (str "/" ASSIGNMENTS-ROOT))
 (def STORMS-SUBTREE (str "/" STORMS-ROOT))
 (def SUPERVISORS-SUBTREE (str "/" SUPERVISORS-ROOT))
 (def WORKERBEATS-SUBTREE (str "/" WORKERBEATS-ROOT))
 (def ERRORS-SUBTREE (str "/" ERRORS-ROOT))
+;;##thinker-start
+(def MASTER-SUBTREE (str "/" MASTER-ROOT))
+(def SLAVE-SUBTREE (str "/" SLAVE-ROOT))
+;;##thinker-end
 
 (defn supervisor-path
   [id]
@@ -183,6 +209,10 @@
 (defn workerbeat-path
   [storm-id node port]
   (str (workerbeat-storm-root storm-id) "/" node "-" port))
+
+(defn nimbus-slaves-path
+  [node port]
+  (str SLAVE-SUBTREE "/" node ":" port))
 
 (defn error-storm-root
   [storm-id]
@@ -241,6 +271,9 @@
         assignment-version-callback (atom {})
         supervisors-callback (atom nil)
         assignments-callback (atom nil)
+;;thinker-start
+        master-callback (atom nil)
+;;thinker-end
         storm-base-callback (atom {})
         state-id (register
                    cluster-state
@@ -252,6 +285,9 @@
                                             (issue-map-callback! assignment-info-callback (first args)))
                          SUPERVISORS-ROOT (issue-callback! supervisors-callback)
                          STORMS-ROOT (issue-map-callback! storm-base-callback (first args))
+;;##thinker-start
+                         MASTER-ROOT (issue-callback! master-callback)
+;;##thinker-end
                          ;; this should never happen
                          (exit-process! 30 "Unknown callback for subtree " subtree args)))))]
     (doseq [p [ASSIGNMENTS-SUBTREE STORMS-SUBTREE SUPERVISORS-SUBTREE WORKERBEATS-SUBTREE ERRORS-SUBTREE]]
@@ -417,6 +453,46 @@
               ]
           (->> (filter not-nil? errors)
                (sort-by (comp - :time-secs)))))
+
+;;##thinker-start
+      (register-nimbus-host!
+        [this node port]
+          (set-ephemeral-node cluster-state (nimbus-slaves-path node port) nil)
+       )
+
+      (unregister-nimbus-host!
+        [this node port]
+          (delete-node cluster-state (nimbus-slaves-path node port))
+       )
+
+      (update-follower-heartbeat!
+        [this node port uptime]
+          (set-data cluster-state (nimbus-slaves-path node port) uptime)
+        )
+
+      (get-leader-host 
+        [this]
+          (get-data cluster-state MASTER-SUBTREE false)
+       )
+      
+      (leader-existed 
+        [this]
+          (node-existed cluster-state (nimbus-master) false)
+       )
+
+      (try-to-be-master!
+        [this path node port callback]
+          (when callback
+            (reset! master-callback callback))
+          (try-cause
+            (try-to-be-master)
+            (catch NodeExistsException ex
+              (node-existed cluster-state path true)
+              (log-error "leader is alive!")
+              )
+          )
+        )
+;;##thinker-end
 
       (disconnect
         [this]
